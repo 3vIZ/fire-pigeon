@@ -3580,4 +3580,62 @@ body.fp-mobile #login-screen h1{font-size:2rem}
   setInterval(()=>{ const ls=document.getElementById('login-screen'); const onLogin=ls && getComputedStyle(ls).display!=='none' && ls.offsetParent!==null; document.getElementById('fp-mobile').style.display=onLogin?'none':''; },500);
 })();
 </script>
+
+<!-- Mobile PLAY button reliability patch -->
+<style id="fp-mobile-play-button-fix">
+  #login-screen { pointer-events:auto !important; }
+  #login-play-button {
+    position:relative !important; z-index:2147483000 !important;
+    display:flex !important; visibility:visible !important; opacity:1 !important;
+    pointer-events:auto !important; touch-action:manipulation !important;
+    -webkit-tap-highlight-color:rgba(255,69,0,.25); cursor:pointer;
+  }
+  @media (max-width:760px) {
+    #login-screen { overflow-y:auto !important; overscroll-behavior:contain; }
+    #login-play-button { min-height:58px !important; flex-shrink:0 !important; margin-bottom:max(8px, env(safe-area-inset-bottom)) !important; }
+    #login-card { max-height:none !important; }
+  }
+</style>
+<script id="fp-mobile-play-button-fix-script">
+(function () {
+  function startFromPlayButton(event) {
+    if (event) { event.preventDefault(); event.stopPropagation(); }
+    const screen = document.getElementById('login-screen');
+    if (!screen || screen.style.display === 'none') return;
+    // Respect an active maintenance lock, but never block solo play just because
+    // a room-code connection was not established.
+    if (window.isMaintenanceBlocking && window.isMaintenanceBlocking()) {
+      if (window.showMaintBlocked) window.showMaintBlocked();
+      return;
+    }
+    screen.style.display = 'none';
+    screen.setAttribute('aria-hidden', 'true');
+    try { if (window.sfx && typeof window.sfx.score === 'function') window.sfx.score(); } catch (_) {}
+    // Multiplayer can continue if connected; otherwise the game starts solo.
+  }
+  window.startGameFromLogin = startFromPlayButton;
+  function bind() {
+    const button = document.getElementById('login-play-button');
+    if (!button || button.dataset.fpMobilePlayBound === '1') return;
+    button.dataset.fpMobilePlayBound = '1';
+    button.addEventListener('pointerup', startFromPlayButton, {passive:false});
+    button.addEventListener('click', function (e) {
+      // Keyboard / assistive-technology activation; pointer activation is handled above.
+      if (e.detail === 0) startFromPlayButton(e);
+    });
+    button.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') startFromPlayButton(e);
+    });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind, {once:true});
+  else bind();
+  // Covers pages where the game UI is injected after initial parsing.
+  const retry = window.setInterval(function () {
+    const button = document.getElementById('login-play-button');
+    if (button && button.dataset.fpMobilePlayBound !== '1') bind();
+    if (button && button.dataset.fpMobilePlayBound === '1') window.clearInterval(retry);
+  }, 250);
+})();
+</script>
+
 </body></html>
