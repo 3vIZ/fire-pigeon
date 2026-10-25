@@ -839,7 +839,8 @@
         }
         function scheduleReconnect() {
             if (!sessionStarted || stopReconnect || reconnectTimer !== null) return;
-            const delay = Math.min(1500 * (2 ** reconnectAttempt), 10000);
+            window.__fpMpAttemptActive = false;
+            const delay = Math.min(2500 * (2 ** reconnectAttempt), 15000);
             reconnectAttempt++;
             reconnectTimer = window.setTimeout(() => {
                 reconnectTimer = null;
@@ -848,7 +849,11 @@
         }
         function openMultiplayerPeer() {
             if (!sessionStarted || stopReconnect) return;
+            // Ignore duplicate retry triggers while an attempt is already active.
+            if (window.__fpMpAttemptActive) return;
+            window.__fpMpAttemptActive = true;
             if (!window.Peer) {
+                window.__fpMpAttemptActive = false;
                 setMultiplayerStatus('Multiplayer library did not load. Check your internet connection.');
                 return;
             }
@@ -865,28 +870,48 @@
             const startAsClient = () => {
                 if (fallbackStarted || !sessionStarted || stopReconnect) return;
                 fallbackStarted = true;
-                try { peer?.destroy(); } catch {}
-                peer = new window.Peer();
-                peer.on('open', id => {
+                // Destroying the failed room-claim peer fires "close"; that close
+                // must not schedule a retry while this client attempt is underway.
+                try { roomPeer.destroy(); } catch {}
+                const clientPeer = new window.Peer();
+                peer = clientPeer;
+                clientPeer.on('open', id => {
+                    if (peer !== clientPeer || !sessionStarted || stopReconnect) return;
+                    window.__fpMpAttemptActive = false;
                     window.mpState.userId = id;
                     localPlayer = currentPlayerSnapshot();
-                    connectToHost(peer, hostId);
+                    connectToHost(clientPeer, hostId);
                 });
-                peer.on('connection', registerHostConnection);
-                peer.on('error', err => {
+                clientPeer.on('connection', registerHostConnection);
+                clientPeer.on('error', err => {
+                    if (peer !== clientPeer) return;
                     if (err?.type === 'network' || err?.type === 'server-error') {
-                        setMultiplayerStatus('Multiplayer relay unavailable. Try again shortly.');
+                        setMultiplayerStatus('Multiplayer relay unavailable. Retrying shortly…');
+                        window.__fpMpAttemptActive = false;
+                        scheduleReconnect();
                     }
                 });
-                peer.on('disconnected', () => {
-                    if (sessionStarted && !stopReconnect) {
-                        try { peer.reconnect(); } catch { scheduleReconnect(); }
+                clientPeer.on('disconnected', () => {
+                    if (peer !== clientPeer || !sessionStarted || stopReconnect) return;
+                    window.mpState.connected = false;
+                    updateOnlineCount();
+                    setMultiplayerStatus('Signaling connection interrupted — reconnecting…');
+                    try { clientPeer.reconnect(); } catch {
+                        window.__fpMpAttemptActive = false;
+                        scheduleReconnect();
                     }
+                });
+                clientPeer.on('close', () => {
+                    if (peer !== clientPeer || !sessionStarted || stopReconnect) return;
+                    window.__fpMpAttemptActive = false;
+                    scheduleReconnect();
                 });
             };
             const roomPeer = new window.Peer(hostId);
             peer = roomPeer;
             roomPeer.on('open', id => {
+                if (peer !== roomPeer || fallbackStarted || !sessionStarted || stopReconnect) return;
+                window.__fpMpAttemptActive = false;
                 isRoomHost = true;
                 window.mpState.userId = id;
                 window.mpState.connected = true;
@@ -896,22 +921,29 @@
             });
             roomPeer.on('connection', registerHostConnection);
             roomPeer.on('error', err => {
+                if (peer !== roomPeer || !sessionStarted || stopReconnect) return;
                 if (err?.type === 'unavailable-id') {
                     startAsClient();
                 } else if (!fallbackStarted) {
-                    setMultiplayerStatus('Starting room…');
-                    // A failed room-host claim can be a transient relay issue.
-                    if (err?.type === 'network' || err?.type === 'server-error') scheduleReconnect();
+                    setMultiplayerStatus('Multiplayer connection failed — retrying…');
+                    window.__fpMpAttemptActive = false;
+                    scheduleReconnect();
                 }
             });
             roomPeer.on('disconnected', () => {
-                if (sessionStarted && !stopReconnect) {
-                    setMultiplayerStatus('Reconnecting to multiplayer…');
-                    try { roomPeer.reconnect(); } catch { scheduleReconnect(); }
+                if (peer !== roomPeer || !sessionStarted || stopReconnect || fallbackStarted) return;
+                setMultiplayerStatus('Signaling connection interrupted — reconnecting…');
+                try { roomPeer.reconnect(); } catch {
+                    window.__fpMpAttemptActive = false;
+                    scheduleReconnect();
                 }
             });
             roomPeer.on('close', () => {
-                if (sessionStarted && !stopReconnect) scheduleReconnect();
+                // Ignore the room peer's close after it intentionally yields to a client.
+                if (peer === roomPeer && !fallbackStarted && sessionStarted && !stopReconnect) {
+                    window.__fpMpAttemptActive = false;
+                    scheduleReconnect();
+                }
             });
         }
         function sendPlayerState() {
@@ -933,8 +965,13 @@
             }
             window.mpState.roomCode = roomCode;
             try { localStorage.setItem('firePigeon_roomCode', roomCode); } catch {}
+            if (sessionStarted && (window.mpState.connected || window.__fpMpAttemptActive)) {
+                setMultiplayerStatus('Already connected or connecting to this room.');
+                return true;
+            }
             sessionStarted = true;
             stopReconnect = false;
+            reconnectAttempt = 0;
             setMultiplayerStatus('Connecting…');
             updateOnlineCount();
             if (stateSyncTimer === null) stateSyncTimer = window.setInterval(sendPlayerState, 100);
@@ -960,6 +997,7 @@
         window.mpPlayerName = playerName;
         window.mpKick = () => {
             sessionStarted = false; stopReconnect = true;
+            window.__fpMpAttemptActive = false;
             if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
             if (stateSyncTimer !== null) window.clearInterval(stateSyncTimer);
             try { peer?.destroy(); } catch {}
