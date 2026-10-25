@@ -625,7 +625,8 @@
         <span class="bg-brandRed text-black px-2 py-0.5 rounded text-xs font-mono font-black" id="prompt-key">E / CLICK</span>
         <span id="prompt-text">Pick up Dorm Ball</span>
     </div>
-    <!-- Realtime Multiplayer -->
+    <!-- GitHub Pages-compatible peer-to-peer multiplayer -->
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <script type="module">
         const roomCodeInput = document.getElementById('room-code-input');
         const queryRoom = new URLSearchParams(window.location.search).get('room');
@@ -641,9 +642,7 @@
         }
 
         const createDormIdentity = () => {
-            if (typeof window.crypto?.randomUUID === 'function') {
-                return window.crypto.randomUUID().replace(/-/g, '');
-            }
+            if (typeof window.crypto?.randomUUID === 'function') return window.crypto.randomUUID().replace(/-/g, '');
             return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`.slice(0, 40);
         };
         const privateDormWorld = (() => {
@@ -668,9 +667,7 @@
                 const generated = `Pigeon_${playerSuffix}`;
                 localStorage.setItem('firePigeon_playerName', generated);
                 return generated;
-            } catch {
-                return `Pigeon_${playerSuffix}`;
-            }
+            } catch { return `Pigeon_${playerSuffix}`; }
         })();
         document.getElementById('watch-user-name').innerText = playerName;
         document.getElementById('watch-user-handle').innerText = `@${playerName.toLowerCase()}`;
@@ -683,12 +680,18 @@
             otherPlayers: Object.create(null)
         };
 
-        let multiplayerSocket = null;
+        // A deterministic PeerJS ID lets one player host a room while everyone
+        // else connects directly to that host. The host relays state updates.
+        let peer = null;
+        let isRoomHost = false;
         let stateSyncTimer = null;
         let reconnectTimer = null;
         let reconnectAttempt = 0;
         let sessionStarted = false;
         let stopReconnect = false;
+        let localPlayer = null;
+        const peerConnections = new Map();
+        const remotePlayers = new Map();
 
         function setMultiplayerStatus(message, connected = false) {
             const loginStatus = document.getElementById('login-multiplayer-status');
@@ -700,135 +703,227 @@
                 gameStatus.classList.toggle('text-amber-300', !connected);
             }
         }
-
         function updateOnlineCount() {
             const currentWorld = currentMultiplayerWorld();
-            const remoteCount = Object.values(window.mpState.otherPlayers).filter(player => player.room === currentWorld).length;
-            const count = remoteCount + (window.mpState.connected ? 1 : 0);
+            const remoteCount = Object.values(window.mpState.otherPlayers).filter(p => p.room === currentWorld).length;
             const countLabel = document.getElementById('online-users-count');
-            if (countLabel) countLabel.innerText = `${count} Online`;
+            if (countLabel) countLabel.innerText = `${remoteCount + (window.mpState.connected ? 1 : 0)} Online`;
         }
-
         function renderRemotePlayer(player) {
             if (!player || typeof player.id !== 'string') return;
             window.onRemoteMaint?.(player);
             window.maintAnonymizeRemote?.(player);
             window.mpState.otherPlayers[player.id] = player;
-            if (player.room === currentMultiplayerWorld()) {
-                window.updateOrCreateRemotePlayer?.(player.id, player);
-            } else {
-                window.removeRemotePlayerMesh?.(player.id);
-            }
+            if (player.room === currentMultiplayerWorld()) window.updateOrCreateRemotePlayer?.(player.id, player);
+            else window.removeRemotePlayerMesh?.(player.id);
             updateOnlineCount();
         }
-
         function removePlayer(playerId) {
             delete window.mpState.otherPlayers[playerId];
             window.removeRemotePlayerMesh?.(playerId);
             updateOnlineCount();
         }
-
         function refreshRemotePlayersForRoom() {
-            const currentWorld = currentMultiplayerWorld();
-            for (const [playerId, player] of Object.entries(window.mpState.otherPlayers)) {
-                if (player.room === currentWorld) {
-                    window.updateOrCreateRemotePlayer?.(playerId, player);
-                } else {
-                    window.removeRemotePlayerMesh?.(playerId);
-                }
+            const world = currentMultiplayerWorld();
+            for (const [id, player] of Object.entries(window.mpState.otherPlayers)) {
+                if (player.room === world) window.updateOrCreateRemotePlayer?.(id, player);
+                else window.removeRemotePlayerMesh?.(id);
             }
             updateOnlineCount();
         }
-
-        function handleServerMessage(event) {
-            let message;
-            try {
-                message = JSON.parse(event.data);
-            } catch {
-                return;
-            }
-
-            if (message.type === 'welcome') {
-                window.mpState.userId = message.id;
-                window.mpState.connected = true;
-                reconnectAttempt = 0;
-                const currentPlayers = Array.isArray(message.players) ? message.players : [];
-                const presentIds = new Set(currentPlayers.map(player => player?.id).filter(id => typeof id === 'string'));
-                for (const playerId of Object.keys(window.mpState.otherPlayers)) {
-                    if (!presentIds.has(playerId)) removePlayer(playerId);
-                }
-                currentPlayers.forEach(renderRemotePlayer);
-                setMultiplayerStatus(`Connected to ${window.mpState.roomCode}`, true);
-                updateOnlineCount();
-                return;
-            }
-
-            if (message.type === 'player_joined' || message.type === 'player_update') {
-                renderRemotePlayer(message.player);
-                return;
-            }
-
-            if (message.type === 'player_left' && typeof message.id === 'string') {
-                removePlayer(message.id);
-                return;
-            }
-
-            if (message.type === 'error') {
-                const text = typeof message.message === 'string' ? message.message : 'Unable to join this room.';
-                setMultiplayerStatus(text);
-                if (/full|room code|busy/i.test(text)) stopReconnect = true;
-            }
-        }
-
-        function openMultiplayerSocket() {
-            if (!sessionStarted || stopReconnect) return;
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-            multiplayerSocket = socket;
-            socket.addEventListener('open', () => {
-                setMultiplayerStatus('Joining room…');
-                socket.send(JSON.stringify({
-                    type: 'join',
-                    roomCode: window.mpState.roomCode,
-                    name: playerName,
-                    avatarConfig: Object.assign({}, window.avatarConfig || {}, window.__maintOutbound ? { __maint: window.__maintOutbound } : {})
-                }));
-            });
-            socket.addEventListener('message', handleServerMessage);
-            socket.addEventListener('error', () => {
-                setMultiplayerStatus('Connection interrupted — retrying');
-            });
-            socket.addEventListener('close', event => {
-                if (multiplayerSocket !== socket) return;
-                window.mpState.connected = false;
-                window.mpState.userId = null;
-                window.mpState.otherPlayers = Object.create(null);
-                window.removeAllRemotePlayerMeshes?.();
-                updateOnlineCount();
-                if (!sessionStarted || stopReconnect || event.code === 1008) {
-                    setMultiplayerStatus(stopReconnect ? 'Room is full or unavailable' : 'Offline');
-                    return;
-                }
-                setMultiplayerStatus('Connection lost — reconnecting');
-                const delay = Math.min(1000 * 2 ** reconnectAttempt, 10000);
-                reconnectAttempt += 1;
-                reconnectTimer = window.setTimeout(openMultiplayerSocket, delay);
-            });
-        }
-
-        function sendPlayerState() {
-            if (!window.player || multiplayerSocket?.readyState !== WebSocket.OPEN) return;
-            multiplayerSocket.send(JSON.stringify({
-                type: 'state',
-                x: window.player.pos.x,
-                y: window.player.pos.y,
-                z: window.player.pos.z,
-                yaw: window.cameraRotation?.yaw || 0,
+        function currentPlayerSnapshot() {
+            return {
+                id: window.mpState.userId,
+                name: playerName,
+                x: Number(window.player?.pos?.x || 0),
+                y: Number(window.player?.pos?.y || 0),
+                z: Number(window.player?.pos?.z || 0),
+                yaw: Number(window.cameraRotation?.yaw || 0),
                 room: currentMultiplayerWorld(),
                 avatarConfig: Object.assign({}, window.avatarConfig || {}, window.__maintOutbound ? { __maint: window.__maintOutbound } : {})
-            }));
+            };
         }
-
+        function sendToConnection(conn, payload) {
+            if (conn && conn.open) {
+                try { conn.send(payload); } catch {}
+            }
+        }
+        function broadcast(payload, exceptId = null) {
+            for (const [id, conn] of peerConnections) {
+                if (id !== exceptId) sendToConnection(conn, payload);
+            }
+        }
+        function registerHostConnection(conn) {
+            peerConnections.set(conn.peer, conn);
+            conn.on('data', data => {
+                if (!data || typeof data !== 'object') return;
+                if (data.type === 'join') {
+                    const id = conn.peer;
+                    const player = {
+                        id, name: String(data.name || 'Pigeon').slice(0, 20),
+                        x: 0, y: 0, z: 0, yaw: 0, room: 'dorm',
+                        avatarConfig: data.avatarConfig && typeof data.avatarConfig === 'object' ? data.avatarConfig : {}
+                    };
+                    remotePlayers.set(id, player);
+                    renderRemotePlayer(player);
+                    sendToConnection(conn, {
+                        type: 'welcome',
+                        id: window.mpState.userId,
+                        players: [currentPlayerSnapshot(), ...Array.from(remotePlayers.values()).filter(p => p.id !== id)]
+                    });
+                    broadcast({ type: 'player_joined', player }, id);
+                    return;
+                }
+                if (data.type === 'state') {
+                    const old = remotePlayers.get(conn.peer);
+                    if (!old) return;
+                    const player = {
+                        ...old,
+                        x: Number(data.x) || 0, y: Number(data.y) || 0, z: Number(data.z) || 0,
+                        yaw: Number(data.yaw) || 0,
+                        room: typeof data.room === 'string' ? data.room : 'dorm',
+                        avatarConfig: data.avatarConfig && typeof data.avatarConfig === 'object' ? data.avatarConfig : old.avatarConfig
+                    };
+                    remotePlayers.set(conn.peer, player);
+                    renderRemotePlayer(player);
+                    broadcast({ type: 'player_update', player }, conn.peer);
+                }
+            });
+            const cleanup = () => {
+                peerConnections.delete(conn.peer);
+                if (remotePlayers.delete(conn.peer)) broadcast({ type: 'player_left', id: conn.peer });
+            };
+            conn.on('close', cleanup);
+            conn.on('error', cleanup);
+        }
+        function handlePeerMessage(data) {
+            if (!data || typeof data !== 'object') return;
+            if (data.type === 'welcome') {
+                window.mpState.connected = true;
+                reconnectAttempt = 0;
+                const players = Array.isArray(data.players) ? data.players : [];
+                const present = new Set(players.map(p => p?.id).filter(id => typeof id === 'string' && id !== window.mpState.userId));
+                for (const id of Object.keys(window.mpState.otherPlayers)) if (!present.has(id)) removePlayer(id);
+                players.forEach(p => { if (p?.id !== window.mpState.userId) renderRemotePlayer(p); });
+                setMultiplayerStatus(`Connected to ${window.mpState.roomCode}`, true);
+            } else if (data.type === 'player_joined' || data.type === 'player_update') {
+                if (data.player?.id !== window.mpState.userId) renderRemotePlayer(data.player);
+            } else if (data.type === 'player_left' && typeof data.id === 'string') {
+                removePlayer(data.id);
+            } else if (data.type === 'join') {
+                // Host receives this message from a joining client.
+            } else if (data.type === 'error') {
+                setMultiplayerStatus(String(data.message || 'Unable to join room.'));
+            }
+        }
+        function connectToHost(clientPeer, hostId) {
+            const conn = clientPeer.connect(hostId, { reliable: true, serialization: 'json' });
+            conn.on('open', () => {
+                setMultiplayerStatus(`Joining ${window.mpState.roomCode}…`);
+                sendToConnection(conn, {
+                    type: 'join', name: playerName,
+                    avatarConfig: Object.assign({}, window.avatarConfig || {}, window.__maintOutbound ? { __maint: window.__maintOutbound } : {})
+                });
+                window.__fpHostConnection = conn;
+                conn.on('data', handlePeerMessage);
+                conn.on('close', () => {
+                    if (!sessionStarted || stopReconnect) return;
+                    window.mpState.connected = false;
+                    setMultiplayerStatus('Room host disconnected — reconnecting');
+                    scheduleReconnect();
+                });
+            });
+            conn.on('error', () => {
+                setMultiplayerStatus('Could not connect to this room. Check the room code and try again.');
+            });
+        }
+        function scheduleReconnect() {
+            if (!sessionStarted || stopReconnect || reconnectTimer !== null) return;
+            const delay = Math.min(1500 * (2 ** reconnectAttempt), 10000);
+            reconnectAttempt++;
+            reconnectTimer = window.setTimeout(() => {
+                reconnectTimer = null;
+                openMultiplayerPeer();
+            }, delay);
+        }
+        function openMultiplayerPeer() {
+            if (!sessionStarted || stopReconnect) return;
+            if (!window.Peer) {
+                setMultiplayerStatus('Multiplayer library did not load. Check your internet connection.');
+                return;
+            }
+            if (peer) {
+                try { peer.destroy(); } catch {}
+                peer = null;
+            }
+            peerConnections.clear();
+            remotePlayers.clear();
+            isRoomHost = false;
+            setMultiplayerStatus('Connecting to multiplayer…');
+            const hostId = `firepigeon-${window.mpState.roomCode.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
+            let fallbackStarted = false;
+            const startAsClient = () => {
+                if (fallbackStarted || !sessionStarted || stopReconnect) return;
+                fallbackStarted = true;
+                try { peer?.destroy(); } catch {}
+                peer = new window.Peer();
+                peer.on('open', id => {
+                    window.mpState.userId = id;
+                    localPlayer = currentPlayerSnapshot();
+                    connectToHost(peer, hostId);
+                });
+                peer.on('connection', registerHostConnection);
+                peer.on('error', err => {
+                    if (err?.type === 'network' || err?.type === 'server-error') {
+                        setMultiplayerStatus('Multiplayer relay unavailable. Try again shortly.');
+                    }
+                });
+                peer.on('disconnected', () => {
+                    if (sessionStarted && !stopReconnect) {
+                        try { peer.reconnect(); } catch { scheduleReconnect(); }
+                    }
+                });
+            };
+            const roomPeer = new window.Peer(hostId);
+            peer = roomPeer;
+            roomPeer.on('open', id => {
+                isRoomHost = true;
+                window.mpState.userId = id;
+                window.mpState.connected = true;
+                localPlayer = currentPlayerSnapshot();
+                setMultiplayerStatus(`Hosting room ${window.mpState.roomCode}`, true);
+                updateOnlineCount();
+            });
+            roomPeer.on('connection', registerHostConnection);
+            roomPeer.on('error', err => {
+                if (err?.type === 'unavailable-id') {
+                    startAsClient();
+                } else if (!fallbackStarted) {
+                    setMultiplayerStatus('Starting room…');
+                    // A failed room-host claim can be a transient relay issue.
+                    if (err?.type === 'network' || err?.type === 'server-error') scheduleReconnect();
+                }
+            });
+            roomPeer.on('disconnected', () => {
+                if (sessionStarted && !stopReconnect) {
+                    setMultiplayerStatus('Reconnecting to multiplayer…');
+                    try { roomPeer.reconnect(); } catch { scheduleReconnect(); }
+                }
+            });
+            roomPeer.on('close', () => {
+                if (sessionStarted && !stopReconnect) scheduleReconnect();
+            });
+        }
+        function sendPlayerState() {
+            if (!window.player) return;
+            const state = currentPlayerSnapshot();
+            if (isRoomHost) {
+                localPlayer = state;
+                broadcast({ type: 'player_update', player: state });
+            } else {
+                sendToConnection(window.__fpHostConnection, { type: 'state', ...state });
+            }
+        }
         function connectMultiplayer() {
             const roomCode = (roomCodeInput?.value || '').trim().toUpperCase();
             if (!/^[A-Z0-9-]{2,16}$/.test(roomCode)) {
@@ -843,10 +938,9 @@
             setMultiplayerStatus('Connecting…');
             updateOnlineCount();
             if (stateSyncTimer === null) stateSyncTimer = window.setInterval(sendPlayerState, 100);
-            openMultiplayerSocket();
+            openMultiplayerPeer();
             return true;
         }
-
         async function copyRoomInvite() {
             const roomCode = (roomCodeInput?.value || 'LOBBY').trim().toUpperCase();
             if (!/^[A-Z0-9-]{2,16}$/.test(roomCode)) {
@@ -863,12 +957,14 @@
                 setMultiplayerStatus(`Share this room code with friends: ${roomCode}`);
             }
         }
-
         window.mpPlayerName = playerName;
         window.mpKick = () => {
             sessionStarted = false; stopReconnect = true;
             if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-            multiplayerSocket?.close(1000, 'Maintenance');
+            if (stateSyncTimer !== null) window.clearInterval(stateSyncTimer);
+            try { peer?.destroy(); } catch {}
+            peer = null;
+            window.__fpHostConnection = null;
             setMultiplayerStatus('Disconnected: server maintenance');
         };
         window.connectMultiplayer = connectMultiplayer;
@@ -878,7 +974,7 @@
             sessionStarted = false;
             if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
             if (stateSyncTimer !== null) window.clearInterval(stateSyncTimer);
-            multiplayerSocket?.close(1000, 'Leaving game');
+            try { peer?.destroy(); } catch {}
         });
     </script>
 
