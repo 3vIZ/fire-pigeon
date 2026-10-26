@@ -492,7 +492,7 @@
     </div>
 
     <!-- HUD Overlay Top Bar -->
-    <div class="absolute top-4 left-4 right-4 flex justify-between items-center pointer-events-none z-10">
+    <div id="desktop-top-hud" class="absolute top-4 left-4 right-4 flex justify-between items-center pointer-events-none z-10">
         <!-- Brand & Score -->
         <div class="glass-panel px-5 py-3 rounded-2xl flex items-center gap-5 pointer-events-auto shadow-2xl">
             <div class="flex flex-col leading-none">
@@ -3635,6 +3635,97 @@ body.fp-mobile #login-screen h1{font-size:2rem}
     if (button && button.dataset.fpMobilePlayBound !== '1') bind();
     if (button && button.dataset.fpMobilePlayBound === '1') window.clearInterval(retry);
   }, 250);
+})();
+</script>
+
+
+<style id="fp-mobile-layout-2026-fix">
+  /* Mobile gameplay: hide the desktop top HUD to leave the play area open. */
+  @media (max-width: 900px), (pointer: coarse) {
+    body.fp-mobile #desktop-top-hud { display: none !important; }
+  }
+
+  /* Landscape phones have very little vertical space: remove the avatar preview,
+     compact the login card, and keep the PLAY control inside a scrollable viewport. */
+  @media (max-height: 560px) and (max-width: 1000px) {
+    body.fp-mobile #login-screen {
+      align-items: flex-start !important;
+      justify-content: center !important;
+      padding: max(4px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom)) !important;
+      overflow-x: hidden !important;
+      overflow-y: auto !important;
+      -webkit-overflow-scrolling: touch;
+    }
+    body.fp-mobile #login-screen > .relative.w-full.max-w-4xl {
+      display: flex !important;
+      flex-direction: column !important;
+      width: min(100%, 460px) !important;
+      max-width: 460px !important;
+      height: auto !important;
+      min-height: 0 !important;
+      padding: 4px 0 10px !important;
+      margin: auto !important;
+      gap: 4px !important;
+    }
+    body.fp-mobile #login-screen > .relative.w-full.max-w-4xl > .w-1\/2 { display: none !important; }
+    body.fp-mobile #login-card { width: 100% !important; max-width: 100% !important; gap: 6px !important; }
+    body.fp-mobile #login-card .bg-white\/95 { padding: 10px !important; }
+    body.fp-mobile #login-card input { padding: 7px 10px !important; margin-bottom: 5px !important; min-height: 34px !important; }
+    body.fp-mobile #login-username-display { font-size: 1rem !important; margin-bottom: 5px !important; }
+    body.fp-mobile #login-play-button {
+      display: flex !important;
+      min-height: 50px !important;
+      height: auto !important;
+      padding: 9px 12px !important;
+      margin: 4px 0 max(8px, env(safe-area-inset-bottom)) !important;
+      position: relative !important;
+      z-index: 2147483000 !important;
+      pointer-events: auto !important;
+      touch-action: manipulation !important;
+    }
+  }
+
+  /* On phones the Watch is a 4:3 panel, rather than a tall full-screen sheet. */
+  @media (pointer: coarse), (max-width: 760px) {
+    body.fp-mobile #smartwatch-modal { padding: 6px !important; }
+    body.fp-mobile #smartwatch-modal .watch-container {
+      width: min(94vw, 117.333dvh) !important;
+      height: auto !important;
+      aspect-ratio: 4 / 3 !important;
+      max-width: 94vw !important;
+      max-height: 88dvh !important;
+      min-height: 0 !important;
+      padding: clamp(8px, 2.5vw, 16px) !important;
+      overflow-x: hidden !important;
+      overflow-y: auto !important;
+      overscroll-behavior: contain;
+    }
+  }
+</style>
+<script id="fp-mobile-layout-2026-fix-script">
+(function () {
+  // Keep the mobile overlay from stealing taps from login, including in landscape.
+  function syncMobileOverlay() {
+    const overlay = document.getElementById('fp-mobile');
+    const login = document.getElementById('login-screen');
+    if (!overlay || !login) return;
+    const loginVisible = getComputedStyle(login).display !== 'none' && login.getAttribute('aria-hidden') !== 'true';
+    overlay.style.display = loginVisible ? 'none' : '';
+  }
+  function init() {
+    syncMobileOverlay();
+    const login = document.getElementById('login-screen');
+    if (login && window.MutationObserver) {
+      new MutationObserver(syncMobileOverlay).observe(login, { attributes: true, attributeFilter: ['style', 'class', 'aria-hidden'] });
+    }
+    window.addEventListener('resize', syncMobileOverlay, { passive: true });
+    window.addEventListener('orientationchange', function () { setTimeout(syncMobileOverlay, 100); });
+    // Retry briefly in case the existing mobile setup inserts controls late.
+    let attempts = 0;
+    const retry = setInterval(function () { syncMobileOverlay(); if (++attempts >= 20) clearInterval(retry); }, 250);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
+  else init();
 })();
 </script>
 
